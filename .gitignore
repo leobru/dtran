@@ -66,3 +66,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+object.bin
+asm.lst
+asm.dub
+/dtran

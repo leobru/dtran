@@ -1,0 +1,17 @@
+ imm64:,name,
+ ,yta,0
+ ,yta,1
+ ,yta,7
+ ,yta,77b
+ ,yta,100b
+ ,yta,120b
+ ,yta,177b
+ ,asn,0
+ ,asn,7
+ ,asn,100b
+ ,asn,120b
+ ,e+n,7
+ ,e+n,100b
+ ,e-n,7
+ ,e-n,120b
+ ,end,

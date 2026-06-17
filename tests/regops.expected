@@ -1,0 +1,23 @@
+ REGOPS  :,NAME, NEW DTRAN
+C Commands: 5
+C Constants: 0
+C BSS: 0
+C Memory size: 5
+C Header: 1
+C Symbols: 0
+C Long symbols: 0
+C Debug: 0
+C Data: 0 + set: 0
+C Actual length of the object file is 11
+C Symbol table offset is 10
+ 1,ATI,5
+ 2,STI,5
+ 3,ITA,5
+ 4,ITS,5
+ 5,MTJ,6
+ 7,J+M,6
+ 8,VTM,10B
+ 9,UTM,10B
+ ,RTE,1
+ ,NTR,1
+ ,END,

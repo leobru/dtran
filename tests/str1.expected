@@ -1,0 +1,36 @@
+ STR1    :,NAME, NEW DTRAN
+C Commands: 14
+C Constants: 0
+C BSS: 0
+C Memory size: 14
+C Header: 1
+C Symbols: 0
+C Long symbols: 0
+C Debug: 0
+C Data: 0 + set: 0
+C Actual length of the object file is 20
+C Symbol table offset is 17
+ ,ATX,1
+ ,STX,1
+ ,XTS,1
+ ,A+X,1
+ ,A-X,1
+ ,X-A,1
+ ,AMX,1
+ ,XTA,1
+ ,AAX,1
+ ,AEX,1
+ ,ARX,1
+ ,AVX,1
+ ,AOX,1
+ ,A/X,1
+ ,A*X,1
+ ,APX,1
+ ,AUX,1
+ ,ACX,1
+ ,ANX,1
+ ,E+X,1
+ ,E-X,1
+ ,ASX,1
+ ,XTR,1
+ ,END,

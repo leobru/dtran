@@ -1,0 +1,12 @@
+ regops:,name,
+ 1,ati,5
+ 2,sti,5
+ 3,ita,5
+ 4,its,5
+ 5,mtj,6
+ 7,j+m,6
+ 8,vtm,10b
+ 9,utm,10b
+ ,rte,1
+ ,ntr,1
+ ,end,

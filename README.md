@@ -76,7 +76,8 @@ Each combined function and where it comes from / what changes:
 
 ### Globals
 - **`op[]` opcode table** — identical across all five. Canonical choices: name `0x025000`
-  as **`M+J`** (4/5 files; dtran2's `J+M` dropped). `YTA` = **`OPCODE_IMM64`** (per author),
+  as **`J+M`** (dtran2's spelling; the MADLEN assembler accepts only `J+M` — verified by the
+  coverage tests in §8 — so the earlier `M+J` normalization was wrong). `YTA` = **`OPCODE_IMM64`** (per author),
   and the `64±N` rule applies to the **whole IMM64 family** (`YTA`/`E+N`/`E-N`/`ASN`):
   - zero immediate → bare op, no operand (never `64-64`);
   - **every** non-zero immediate → `64%+d` (`val-64`), including values `< 8` and after `UTC`/`WTC`.
@@ -178,7 +179,9 @@ Each combined function and where it comes from / what changes:
 3. Uninitialized `FILE* gost` (dtran5) → `= NULL`.
 4. `mklabel` declared `uint` but returns nothing (dtran5) → `void`.
 5. `gost_to_utf[026]` `"smc"` debug placeholder (dtran4) → `";"`.
-6. `J+M` (dtran2) → `M+J`.
+6. Opcode `0x025000` mnemonic kept as **`J+M`** (dtran2). The earlier merge wrongly
+   normalized it to `M+J`; MADLEN accepts only `J+M` ("error in opcode" otherwise), so the
+   combined tool must emit `J+M` for a re-assemblable `-e -l` round-trip (see §8).
 7. Dead `prsets` `strtol` block (dtran2/3) → removed.
 8. Pascal-B banner reading unloaded `memory[1]/[2]` (dtran4) → banner dropped entirely (§6).
 
@@ -199,7 +202,8 @@ Each combined function and where it comes from / what changes:
 - Golden diffs (both default and `-d`) vs the originals:
   - **DMS vs dtran2** — identical except the intended IMM64 fix (16 `,YTA,64`→`,YTA,64+0`). No other diffs.
   - **Pascal-B vs dtran4** — identical except: name line `000000:`→`PASCODER:`, dropped
-    compilation-date line, and 2 `,ASN,80`→`,ASN,64+16` (IMM64 generalization).
+    compilation-date line, 2 `,ASN,80`→`,ASN,64+16` (IMM64 generalization), and 5 `,M+J,`→`,J+M,`
+    (mnemonic correction, §8).
   - **Pascal-A vs dtran1** — only (a) the IMM64 rendering fix (`YTA`, and `ASN` after `UTC`/`WTC`)
     and (b) 3 regions that dtran1 dumped as `,LOG`/`,GOST` data and the enhanced reachability
     now decodes as well-formed code (jump-table / `8,UZA` following). Verified: **no** dtran1-side
@@ -207,9 +211,38 @@ Each combined function and where it comes from / what changes:
 - dtran5 is intentionally not a reference: it does not compile (`uint64_t` without `<cstdint>`)
   and its reachability decode `(cinsn & 037) >> 15` is always 0.
 
-## 8. Open follow-up
+## 8. Coverage tests (DMS round-trip)
+
+`tests/*.asm` are small MADLEN sources, each exercising one area. `run-tests.sh` assembles
+each with `./asm.sh` (driving the `dubna` simulator), disassembles the resulting `object.o`
+with `dtran -F dms`, and diffs against the golden `tests/<name>.expected`:
+
+| test | covers |
+|------|--------|
+| `imm64`   | `YTA`/`ASN`/`E+N`/`E-N` — zero→bare, every non-zero→`64±N` (incl. `<8` and `=64`) |
+| `str1`    | all short-address ops `ATX…XTR` (incl. `A/X`, `A*X`) |
+| `regops`  | `ATI/STI/ITA/ITS/MTJ/J+M`, `VTM/UTM`, `RTE/NTR` |
+| `control` | `UJ`, `UZA/U1A/VZM/V1M/VLM`, `VJM`, `UTC/WTC` with a label target |
+| `extops`  | extended `*50/*51/*60/*64/*70/CTX/*76` and `*74` stop |
+| `literals`| constant pool: `INT` (small/large), `LOG`, `TEXT` (8H), `ISO` (6H) |
+
+```
+./run-tests.sh            # assemble + diff all, report PASS/FAIL
+./run-tests.sh --update   # regenerate the .expected goldens
+./run-tests.sh imm64 str1 # run named tests only
+```
+
+Requires `dubna` on PATH (skips with exit 77 otherwise). `object.o` is byte-deterministic
+across assembler runs, so golden diffs are stable. **Finding:** these tests proved MADLEN
+accepts only `J+M` for opcode `0x025000`, fixing the earlier `M+J` regression (§5.6).
+
+## 9. Open follow-up
 - BSS sections (DMS) and the `-I`/`-A`/`-T` Pascal-B offset paths are carried over but not
   exercised by the current samples.
+- Auto-detect requires `cmd_len > 0`, so a command-less DMS module (e.g. an empty or
+  const/data-only object) is not detected and needs explicit `-F dms`. The coverage tests
+  force `-F dms` for this reason.
 
-## 9. Result
+## 10. Result
 `dtran.cc` is ~1450 lines (shared core, three backends, `main`). Build with `make`.
+Coverage: `./run-tests.sh` (6 DMS round-trip tests).

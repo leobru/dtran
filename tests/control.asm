@@ -1,0 +1,12 @@
+ ctl:,name,
+ l1:,xta,1
+ ,uj,l1
+ ,uza,l1
+ ,u1a,l1
+ 2,vzm,l1
+ 2,v1m,l1
+ 2,vlm,l1
+ 13,vjm,l1
+ ,utc,1
+ ,wtc,1
+ ,end,

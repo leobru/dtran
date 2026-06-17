@@ -1,0 +1,28 @@
+ IMM64   :,NAME, NEW DTRAN
+C Commands: 10
+C Constants: 0
+C BSS: 0
+C Memory size: 10
+C Header: 1
+C Symbols: 0
+C Long symbols: 0
+C Debug: 0
+C Data: 0 + set: 0
+C Actual length of the object file is 14
+C Symbol table offset is 13
+ ,YTA,
+ ,YTA,64-63
+ ,YTA,64-57
+ ,YTA,64-1
+ ,YTA,64+0
+ ,YTA,64+16
+ ,YTA,64+63
+ ,ASN,
+ ,ASN,64-57
+ ,ASN,64+0
+ ,ASN,64+16
+ ,E+N,64-57
+ ,E+N,64+0
+ ,E-N,64-57
+ ,E-N,64+16
+ ,END,
