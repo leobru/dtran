@@ -17,6 +17,11 @@ all three input formats with the union of their features, selected by auto-detec
 Confirmed by the author: Pascal-A and Pascal-B are genuinely **two distinct formats**
 (different load base and header layout), so the combined tool keeps three backends.
 
+The five `dtran*.cc` forks are no longer kept as separate files — they are fully
+folded into `dtran.cc`, whose section comments mark each backend's origin
+(`[was dtran2.cc]`, `[was dtran1.cc]`, …).  This document is the derivation
+record of that merge.
+
 ## 2. Format model & detection
 
 ```
@@ -195,7 +200,7 @@ Each combined function and where it comes from / what changes:
   `label_patterns` (its `P/` table stays `#if 0`).
 
 ## 7. Build & validation  — DONE (2026-06-16)
-- `Makefile` added (`make dtran`; `make legacy` builds dtran1-4 for comparison).
+- `Makefile` added (`make dtran`).
 - `dtran.cc` compiles **`-Wall -Wextra` clean, zero warnings**.
 - Auto-detection verified on all three samples (`dms.o`→DMS, `pascal-a.o`→Pascal-A,
   `pascal-b.o`→Pascal-B); `-F dms|pa|pb` produces byte-identical output to auto-detect.
