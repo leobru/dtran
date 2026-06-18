@@ -1,0 +1,72 @@
+ MAIN    :,NAME, NEW DTRAN;
+C Commands: 27
+C Constants: 6
+C BSS: 0
+C Memory size: 35
+C Header: 1
+C Symbols: 12
+C Long symbols: 1
+C Debug: 0
+C Data: 0 + set: 0
+C Actual length of the object file is 54
+C Symbol table offset is 40
+ P/1D    :,BSS,;
+ ,LC,41;
+ *OUTPUT*:,BSS,;
+ ,LC,30;
+ P/CO    :,BSS,;
+ ,SUBP,0;
+ P/IT    :,BSS,;
+ ,SUBP,0;
+ P/6A    :,BSS,;
+ ,SUBP,0;
+ P/WL    :,BSS,;
+ ,SUBP,0;
+ P/EF    :,BSS,;
+ ,SUBP,0;
+ P/1     :,BSS,;
+ ,SUBP,0;
+ ,UJ,*0022B;
+ *0001B:,BSS,;
+ ,ITS,13;
+ 15,ATX,0;
+ 12,VTM,*OUTPUT*;
+ 10,VTM,1;
+ R9 := &8;
+ 11,VTM,1;
+ P/CO (*0027B );
+ #576564606564C(*"  OUTPUT"*);
+ 12,ATX,26;
+ ,UJ,P/IT;
+ *0007B:,BSS,;
+ glob40z := (5);
+ if ((3) >= glob40z) goto *0016B;
+ writeAlfa4( iso(' BIG  ') );
+ writeLN;
+ ,UJ,*0021B;
+ *0016B:,BSS,;
+ writeAlfa6( iso(' SMALL') );
+ writeLN;
+ *0021B:,BSS,;
+ ,UJ,P/EF;
+ *0022B:,BSS,;
+ 14,VJM,P/1;
+ *0001B( 0 );
+ #&*0001B;
+ ,ASN,64-15;
+ 7,AOX,1;
+ 7,ATX,1;
+ ,UJ,*0007B;
+ /0:,BSS,;
+ ,TEXT, 8H*OUTPUT*;
+ /1:,BSS,;
+ ,TEXT, 8H  OUTPUT;
+ /2:,BSS,;
+ ,INT,5;
+ /3:,BSS,;
+ ,INT,3;
+ /4:,BSS,;
+ ,ISO, 6H BIG   . 040 102 111 107 040 040;
+ /5:,BSS,;
+ ,ISO, 6H SMALL . 040 123 115 101 114 114;
+ ,END,0;

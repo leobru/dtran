@@ -610,8 +610,9 @@ def processprocs(d: Dialect, nodes: list[Node]) -> list[Node]:
                 if r in knownregs and n.op == "ITA":
                     nodes[i] = Insn(op="XTA", arg=f"R{r}"); i += 1; continue
             # return from a frameless procedure: (curlev+1),UJ,0 -> RETURN
+            # (decompG renames the runtime return to EXIT up front, l.204).
             if curlev != -1 and n.reg == str(curlev + 1) and n.op == "UJ" and n.arg == "0":
-                nodes[i] = Text("RETURN")
+                nodes[i] = Text("EXIT" if d.underscore_kw else "RETURN")
         i += 1
 
     # --- part 2: hoist procedure headers up by nesting level ---
@@ -1096,7 +1097,9 @@ def stack_machine(d: Dialect, nodes: list[Node]) -> list[Node]:
         bin2 = None
         if stack and len(stack) >= 2:
             if "CALL P/IN" in line:
-                bin2 = f"({stack[-1]} IN {stack[-2]})" if not d.track_regs else f"({stack[-2]} IN {stack[-1]})"
+                inkw = "_IN" if d.underscore_kw else "IN"
+                bin2 = (f"({stack[-2]} {inkw} {stack[-1]})" if d.track_regs
+                        else f"({stack[-1]} {inkw} {stack[-2]})")
             elif "CALL P/PI" in line:
                 bin2 = f"toRange({stack[-2]}..{stack[-1]})"
             elif "CALL P/DI" in line:
@@ -1104,7 +1107,8 @@ def stack_machine(d: Dialect, nodes: list[Node]) -> list[Node]:
             elif "CALL P/IS" in line:
                 bin2 = f"({stack[-2]} /int/ {stack[-1]})"
             elif "CALL P/MD" in line or (d.track_regs and "12,VJM,P/MD" in line):
-                bin2 = f"({stack[-2]} MOD {stack[-1]})"
+                modkw = "_MOD" if d.underscore_kw else "MOD"
+                bin2 = f"({stack[-2]} {modkw} {stack[-1]})"
             elif d.track_regs and "realLT" in line:
                 bin2 = f"({stack[-2]} < {stack[-1]})"
             elif d.track_regs and "realGT" in line:
@@ -1302,13 +1306,14 @@ def convert_int_set(octal: str) -> str:
 
 
 def simple_ops(d: Dialect, nodes: list[Node]) -> list[Node]:
-    """`,UJ,P/E` -> RETURN; drop post-call stack corrections `15,UTM,3|4`."""
+    """`,UJ,P/E` -> RETURN (EXIT in the underscore-keyword dialect); drop
+    post-call stack corrections `15,UTM,3|4`."""
     out: list[Node] = []
     for n in nodes:
         if isinstance(n, Text):
             t = n.text.rstrip()
             if re.fullmatch(r",UJ,P/E", t):
-                out.append(Text("RETURN")); continue
+                out.append(Text("EXIT" if d.underscore_kw else "RETURN")); continue
             if re.fullmatch(r"15,UTM,[34]", t):
                 continue
         out.append(n)
@@ -1457,8 +1462,10 @@ def convert_sets(d: Dialect, nodes: list[Node]) -> list[Node]:
     """Octal set literals -> member lists, by context:
     ` IN (NC)`->` IN [set]`, ` | (NC)`->` + [set]`, ` & (NC)`->` * [set]`,
     plus the `((NC) ^ allones) & X` set-complement idioms."""
+    inkw = "_IN" if d.underscore_kw else "IN"
     def sub(t: str) -> str:
-        t = re.sub(r" IN \(([0-7]+)C\)", lambda m: " IN " + convert_int_set(m.group(1)), t)
+        t = re.sub(rf" {inkw} \(([0-7]+)C\)",
+                   lambda m: f" {inkw} " + convert_int_set(m.group(1)), t)
         t = re.sub(r" \| \(([0-7]+)C\)", lambda m: " + " + convert_int_set(m.group(1)), t)
         t = re.sub(r" \& \(([0-7]+)C\)", lambda m: " * " + convert_int_set(m.group(1)), t)
         t = re.sub(r"(if[^;]*)\(\(\(([0-7]+)C\) \^ allones\) \& ([^()]+)\)",
@@ -1555,7 +1562,8 @@ def recognize_for_loops(d: Dialect, nodes: list[Node]) -> list[Node]:
             kw = "_to" if mg.group(1) == ">" else "_downto"
             head = Text(f"_for {var} := {start} {kw} {mg.group(2)} _do _(")
             body = nodes[li + 2:bj - 1]
-            nodes = nodes[:li - 1] + [head] + body + [Text("_)")] + nodes[bj + 1:]
+            close = Text(f" (* for {mbj.group(1)[1:]} *) _)")  # label number, no 'L'
+            nodes = nodes[:li - 1] + [head] + body + [close] + nodes[bj + 1:]
             changed = True
             break
     return nodes
@@ -1604,6 +1612,191 @@ def recognize_while_loops(d: Dialect, nodes: list[Node]) -> list[Node]:
             changed = True
             break
     return nodes
+
+
+def _ifgoto(n: Node):
+    """`(between, target)` for a Text `_if {between}goto {target}` (a forward
+    branch the stack machine emitted), else None.  `between` is everything from
+    after `_if ` up to `goto`, keeping its trailing space -- e.g. `(c) _then ` or
+    the `_then below _else` form `(c) _then below _else `."""
+    if isinstance(n, Text) and not n.raw:
+        m = re.fullmatch(r"_if (.*)goto (L\d+)", n.text)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
+def _or_guard(n: Node):
+    """`(cond, target)` for a *plain* `_if {cond} _then goto {target}` (no
+    `below`/`_else`), the only shape decompG's `_or` merge folds.  `cond` is the
+    condition alone, without the surrounding `_then`."""
+    if isinstance(n, Text) and not n.raw:
+        m = re.fullmatch(r"_if (.+) _then goto (L\d+)", n.text)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
+def recognize_structured_ifs(d: Dialect, nodes: list[Node]) -> list[Node]:
+    """Pascal-Autocode: fold forward `_if ... _then goto L` branches into
+    structured ifs, mirroring decompG ll.926/929/932 in three sub-passes:
+
+      _or     `_if A _then goto L ; _if B _then goto L`
+              -> `_if ( A _or  B) _then goto L`   (pairwise, left to right)
+      single  `_if C _then goto L ; STMT ; L:`    (STMT one node, no 'J')
+              -> `_if _not C _then  STMT ; L:`
+      block   `_if C _then goto L ; BODY ; L:`    (BODY nodes free of 'B'/'S')
+              -> `_if _not C _then  _( ; BODY ; _) ; L:`
+
+    Runs after `recognize_while_loops`, so a loop's back-jump guard is already a
+    `_while` and never seen here as a forward if.  Faithful to decompG: the `_or`
+    merge is pairwise (a third same-target guard is left alone, as the Perl
+    `s///g` resumes past the merged pair); single is tried before block; the body
+    must sit directly before its exit label, which is kept in place.  The 'J' /
+    'B'/'S' body screens are decompG's literal `[^J;]` / `[^BS]` char classes:
+    'J' bars `,UJ,`/`,MTJ,`/`,VJM,`; 'B'/'S' bar a `,BSS,` label or `BIND` (and,
+    as in the Perl, any ASCII 'B'/'S' inside a string literal)."""
+    if not d.underscore_kw:
+        return nodes
+
+    # 1. _or merge (pairwise: consume both guards, advance past the merged node).
+    out: list[Node] = []
+    i = 0
+    while i < len(nodes):
+        a = _or_guard(nodes[i])
+        b = _or_guard(nodes[i + 1]) if i + 1 < len(nodes) else None
+        if a and b and a[1] == b[1]:
+            out.append(Text(f"_if ( {a[0]} _or  {b[0]}) _then goto {a[1]}"))
+            i += 2
+        else:
+            out.append(nodes[i])
+            i += 1
+    nodes = out
+
+    # 2. single-statement if: one body node with no 'J' directly before exit L.
+    out = []
+    i = 0
+    while i < len(nodes):
+        g = _ifgoto(nodes[i])
+        if g and i + 2 < len(nodes):
+            between, target = g
+            body, lbl = nodes[i + 1], nodes[i + 2]
+            if (isinstance(body, Text) and not body.raw and "J" not in body.text
+                    and isinstance(lbl, Label) and lbl.name == target):
+                out.append(Text(f"_if _not {between} {body.text}"))
+                i += 2          # body folded in; exit label processed next
+                continue
+        out.append(nodes[i])
+        i += 1
+    nodes = out
+
+    # 3. block if: a run of 'B'/'S'-free body nodes ending exactly at exit L.
+    out = []
+    i = 0
+    while i < len(nodes):
+        g = _ifgoto(nodes[i])
+        if g:
+            between, target = g
+            body: list[Node] = []
+            found = False
+            m = i + 1
+            while m < len(nodes):
+                nm = nodes[m]
+                if isinstance(nm, Label) and nm.name == target:
+                    found = bool(body)
+                    break
+                if (isinstance(nm, Text) and not nm.raw
+                        and "B" not in nm.text and "S" not in nm.text):
+                    body.append(nm)
+                    m += 1
+                    continue
+                break               # B/S node, wrong label, or non-text: no block
+            if found:
+                out.append(Text(f"_if _not {between} _("))
+                out.extend(body)
+                out.append(Text("_)"))
+                i = m               # exit label processed next
+                continue
+        out.append(nodes[i])
+        i += 1
+    return out
+
+
+def _code_start(nodes: list[Node]) -> int:
+    """The `C Code start: NNNN` octal threshold (decompG l.9), separating data
+    addresses (`/N`) from code addresses (`LN`).  Defaults huge if absent so
+    every address renders as `/N`."""
+    for n in nodes:
+        if isinstance(n, Comment):
+            m = re.search(r"Code start:\s*(\d+)", n.text)
+            if m:
+                return int(m.group(1), 8)
+    return 1 << 60
+
+
+def pa_addr_folds(d: Dialect, nodes: list[Node]) -> list[Node]:
+    """Pascal-Autocode address folds that must run *before* structured-if
+    recognition (decompG ll.913/917):
+
+      `R13 := &6 ; writeAlfa( &6, X )`  ->  `write(X)`        (adjacent nodes)
+      `R13 := &N`                       ->  `R13 := /N` | `LN`  (`section`)
+
+    The `writeAlfa` fold precedes `section` because `section` would rewrite the
+    `&6` it keys on.  `section` maps a numeric R13 target to a data label `/N`
+    (N below the code-start address) or an octal code label `LN`."""
+    if not d.underscore_kw:
+        return nodes
+    out: list[Node] = []
+    i = 0
+    while i < len(nodes):
+        a, b = nodes[i], nodes[i + 1] if i + 1 < len(nodes) else None
+        if (isinstance(a, Text) and not a.raw and a.text == "R13 := &6"
+                and isinstance(b, Text) and not b.raw):
+            mb = re.fullmatch(r"writeAlfa\( &6, (.+) \)", b.text)
+            if mb:
+                out.append(Text(f"write({mb.group(1)})"))
+                i += 2
+                continue
+        out.append(a)
+        i += 1
+    nodes = out
+
+    code = _code_start(nodes)
+
+    def section(m: "re.Match[str]") -> str:
+        val = int(m.group(1))
+        return "R13 := /" + m.group(1) if val < code else f"R13 := L{val:o}"
+
+    return _map_text(nodes, lambda t: re.sub(r"R13 := &(\d+)", section, t))
+
+
+def pa_ptr_folds(d: Dialect, nodes: list[Node]) -> list[Node]:
+    """Pascal-Autocode pointer / I/O folds that run *after* structured-if
+    recognition (decompG ll.936/948/951):
+
+      `&*(&X+0)`  -> `X`                 (trivial pass-by-reference)
+      `@.f[0]`    -> `@`                 (drop the synthetic first-field index)
+      `output@ := X ; put(output)` -> `write(X)`   (adjacent nodes)
+    """
+    if not d.underscore_kw:
+        return nodes
+    nodes = _map_text(nodes, lambda t: re.sub(r"&\*\(&([a-z0-9]+)\+0\)", r"\1", t))
+    nodes = _map_text(nodes, lambda t: t.replace("@.f[0]", "@"))
+
+    out: list[Node] = []
+    i = 0
+    while i < len(nodes):
+        a, b = nodes[i], nodes[i + 1] if i + 1 < len(nodes) else None
+        if (isinstance(a, Text) and not a.raw and isinstance(b, Text)
+                and not b.raw and b.text == "put(output)"):
+            ma = re.fullmatch(r"output@ := (.*)", a.text)
+            if ma:
+                out.append(Text(f"write({ma.group(1)})"))
+                i += 2
+                continue
+        out.append(a)
+        i += 1
+    return out
 
 
 def cleanup_ws(d: Dialect, nodes: list[Node]) -> list[Node]:
@@ -1682,8 +1875,8 @@ def emit_pascal_decls_pa(d: Dialect, nodes: list[Node]) -> list[Node]:
     headers into `_proced`/`_function` declarations with underscore-keyword
     `_var`/`_array` lists and a `_(` block open.  Ambiguous `(or a func)`
     headers are left as-is (their regex doesn't match), matching decompG.  The
-    runtime return `RETURN` is renamed `EXIT`, except the final one before a
-    `=====` separator, which closes the block as `_)`.
+    runtime return is already `EXIT` by this point; here the final one before a
+    `=====` separator closes the block as `_)`.
     """
     if not d.underscore_kw:
         return nodes
@@ -1714,12 +1907,13 @@ def emit_pascal_decls_pa(d: Dialect, nodes: list[Node]) -> list[Node]:
             # renders every forward decl clean, so drop the ` (header)` marker.
             if n.role == " (header)":
                 out.append(replace(n, role="")); continue
-        if isinstance(n, Text) and n.text == "RETURN":
-            nxt = nodes[idx + 1] if idx + 1 < len(nodes) else None
-            if isinstance(nxt, Text) and nxt.text.startswith("====="):
-                out.append(Text("_)"))
-            else:
-                out.append(Text("EXIT"))
+        # The runtime return is already `EXIT` (renamed up front); only the final
+        # one before a `==========` separator collapses to the block close `_)`
+        # (decompG l.979).  An `EXIT` folded into a structured if stays put.
+        if (isinstance(n, Text) and n.text == "EXIT"
+                and idx + 1 < len(nodes) and isinstance(nodes[idx + 1], Text)
+                and nodes[idx + 1].text.startswith("=====")):
+            out.append(Text("_)"))
             continue
         out.append(n)
     return out
@@ -1798,6 +1992,9 @@ PIPELINE: list[Pass] = [
     cleanup_ws,
     recognize_for_loops,
     recognize_while_loops,
+    pa_addr_folds,             # decompG writeAlfa fold + R13 section labels
+    recognize_structured_ifs,  # decompG (Pascal-Autocode) forward-if folding
+    pa_ptr_folds,              # decompG pointer / output@-put folds
     emit_pascal_decls,       # decomp4 (Pascal-Monitor) declarations
     emit_pascal_decls_pa,    # decompG (Pascal-Autocode) declarations + EXIT
     stray_atx_assign,
