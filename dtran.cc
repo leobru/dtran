@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <strings.h>
 #include <cstdlib>
 #include <cstdarg>
 #include <string>
@@ -222,7 +223,7 @@ void populate_itm() {
 }
 
 FILE * entries;
-std::set<int> gostoff, itmoff, isooff, textoff;
+std::set<int> gostoff, itmoff, isooff, textoff, codeoff;
 int forced_code_off;
 
 enum Format { FMT_AUTO, FMT_DMS, FMT_PASCAL_A, FMT_PASCAL_B };
@@ -965,13 +966,12 @@ struct Dtran {
         uint min_addr = total_len;
         std::vector<uint> todo;
         todo.push_back(main_off);
-        if (entries) {
-            int off;
-            while (1 == fscanf(entries, "%i", &off)) {
+        if (!codeoff.empty()) {
+            for (int off : codeoff) {
                 todo.push_back(off);
                 mklabel(off);
             }
-            fprintf(stderr, "Got %lu known entry points\n", todo.size());
+            fprintf(stderr, "Got %lu known entry points\n", codeoff.size());
         }
 
         // Find all VJM targets by transitive closure, ignoring indirect calls.
@@ -1786,17 +1786,142 @@ static void load_offsets(FILE * f, std::set<int> & s, const char * what) {
     fprintf(stderr, "Got %lu known %s offsets\n", s.size(), what);
 }
 
+// Parse a comma-separated list of octal numbers or start-end ranges
+// (e.g. "100,200-210,377") into the set s.  Whitespace is ignored.
+static void parse_offset_list(const char * list, std::set<int> & s, const char * what) {
+    const char * p = list;
+    for (;;) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p) break;
+        char * end;
+        long start = strtol(p, &end, 8);
+        if (end == p) goto bad;
+        p = end;
+        long stop = start;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == '-') {
+            ++p;
+            stop = strtol(p, &end, 8);
+            if (end == p) goto bad;
+            p = end;
+        }
+        if (stop < start) goto bad;
+        for (long v = start; v <= stop; ++v)
+            s.insert((int) v);
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == ',') { ++p; continue; }
+        if (!*p) break;
+        goto bad;
+    }
+    return;
+bad:
+    fprintf(stderr, "Bad %s offset list: %s\n", what, list);
+    exit(1);
+}
+
+// Read a -D command file.  Each non-blank line is a case-insensitive command
+// "keyword:argument".  iso/gost/itm/text/code take an <offset list> (octal
+// numbers or start-end ranges); base takes a decimal register number.
+static void load_command_file(const char * path, int & basereg) {
+    FILE * f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "Cannot open command file %s\n", path);
+        exit(1);
+    }
+    char line[1024];
+    int lineno = 0;
+    while (fgets(line, sizeof line, f)) {
+        ++lineno;
+        size_t n = strlen(line);
+        while (n && strchr("\r\n \t", line[n-1]))   // strip trailing space/EOL
+            line[--n] = 0;
+        char * s = line;
+        while (*s == ' ' || *s == '\t') ++s;
+        if (!*s) continue;                           // blank line
+        char * colon = strchr(s, ':');
+        if (!colon) {
+            fprintf(stderr, "Command file %s line %d: missing ':' in \"%s\"\n",
+                    path, lineno, s);
+            exit(1);
+        }
+        *colon = 0;
+        char * arg = colon + 1;
+        if      (!strcasecmp(s, "iso"))  parse_offset_list(arg, isooff,  "ISO");
+        else if (!strcasecmp(s, "gost")) parse_offset_list(arg, gostoff, "GOST");
+        else if (!strcasecmp(s, "itm"))  parse_offset_list(arg, itmoff,  "ITM");
+        else if (!strcasecmp(s, "text")) parse_offset_list(arg, textoff, "TEXT");
+        else if (!strcasecmp(s, "code")) parse_offset_list(arg, codeoff, "code");
+        else if (!strcasecmp(s, "base")) {
+            int reg = 0;
+            char extra;
+            if (1 != sscanf(arg, " %d %c", &reg, &extra) || reg < 1 || reg > 15) {
+                fprintf(stderr, "Command file %s line %d: bad base register \"%s\""
+                        " (need 1..15)\n", path, lineno, arg);
+                exit(1);
+            }
+            basereg = reg;
+        } else {
+            fprintf(stderr, "Command file %s line %d: unknown command \"%s\"\n",
+                    path, lineno, s);
+            exit(1);
+        }
+    }
+    fclose(f);
+}
+
+static const char * usage = "Usage: %s [options] objfile  (try '%s -h' for help)\n";
+
+static void print_help(const char * prog) {
+    printf("Usage: %s [options] objfile\n", prog);
+    printf(
+"\n"
+"Disassemble a BESM-6 binary into MADLEN-style pseudo-assembly. Three container\n"
+"formats are understood and auto-detected; -F overrides. With -d the output is\n"
+"tuned as input for the decomp.pl decompiler.\n"
+"\n"
+"Input format (default: auto-detect):\n"
+"  -F dms|pa|pb  force the container format instead of detecting it:\n"
+"                  dms  Dubna Monitor System object module\n"
+"                  pa   Pascal exec, load base 0      (Pascal-Autocode)\n"
+"                  pb   Pascal exec, load base 02000  (paged, Pascal-Monitor)\n"
+"                Auto-detect needs a non-empty command section for dms, so\n"
+"                command-less DMS modules need an explicit -F dms.\n"
+"\n"
+"Output form:\n"
+"  -l            omit generated labels and emit a re-assemblable form\n"
+"                (references become label-relative, /+N); pair with -e\n"
+"  -e            expand EQUs: print literal values instead of EQU names (DMS)\n"
+"  -n            suppress the /NNNN data labels (Pascal)\n"
+"  -o            decimal operands and offsets instead of octal (drop B suffix)\n"
+"  -c            render constant references as inline literals\n"
+"\n"
+"Code/data recovery:\n"
+"  -R N          resolve addresses relative to base register N (1..15)\n"
+"  -f off        force the code/data split at offset off (C radix: 0x.. 0.. dec)\n"
+"  -E file       read extra known entry-point offsets, one per line\n"
+"\n"
+"Command file (supersedes the capital-letter options -R and -E):\n"
+"  -D file       read commands, one per line, case-insensitive.  Text-encoding\n"
+"                offsets are set only here:\n"
+"                  iso:<list>   gost:<list>   itm:<list>   text:<list>\n"
+"                  code:<list>  (entry points)   base:<decimal register>\n"
+"                where <list> is comma-separated octal offsets or start-end\n"
+"                ranges, e.g.  code:1000,2050-2077,3001\n"
+"\n"
+"Presets:\n"
+"  -d            decompiler preset; equivalent to -e -o -c -R8\n"
+"\n"
+"  -h            show this help and exit\n");
+}
+
 int main (int argc, char **argv) {
     int basereg = 0;
     bool nolabels = false, noequs = false, nodlabels = false, nooctal = false, litconst = false;
     Format fmt = FMT_AUTO;
-    FILE * gost = NULL, * itm = NULL, * ascii = NULL, * text = NULL;
+    const char * cmdfile = NULL;
 
-    const char * usage = "Usage: %s [-l] [-e] [-o] [-n] [-c] [-Rbase] [-d] "
-                         "[-Eentries] [-Ggost] [-Iitm] [-Aiso] [-Ttext] [-foff] "
-                         "[-Fdms|pa|pb] objfile\n";
     int opt;
-    while ((opt = getopt(argc, argv, "cdelnoeR:E:G:I:A:T:f:F:")) != -1) {
+    while ((opt = getopt(argc, argv, "hcdelnoeR:E:f:F:D:")) != -1) {
         switch (opt) {
         case 'l': nolabels = true; break;            // compilable assembly
         case 'o': nooctal = true; break;             // decimal offsets
@@ -1820,30 +1945,6 @@ int main (int argc, char **argv) {
                 exit(1);
             }
             break;
-        case 'G':
-            if ((gost = fopen(optarg, "r")) == NULL) {
-                fprintf(stderr, "Bad GOST offsets file %s\n", optarg);
-                exit(1);
-            }
-            break;
-        case 'I':
-            if ((itm = fopen(optarg, "r")) == NULL) {
-                fprintf(stderr, "Bad ITM offsets file %s\n", optarg);
-                exit(1);
-            }
-            break;
-        case 'A':
-            if ((ascii = fopen(optarg, "r")) == NULL) {
-                fprintf(stderr, "Bad ASCII offsets file %s\n", optarg);
-                exit(1);
-            }
-            break;
-        case 'T':
-            if ((text = fopen(optarg, "r")) == NULL) {
-                fprintf(stderr, "Bad TEXT offsets file %s\n", optarg);
-                exit(1);
-            }
-            break;
         case 'f':
             if (1 != sscanf(optarg, "%i", &forced_code_off)) {
                 fprintf(stderr, "Bad forced code offset %s\n", optarg);
@@ -1851,27 +1952,34 @@ int main (int argc, char **argv) {
             }
             break;
         case 'F': fmt = parse_format(optarg); break;
+        case 'D': cmdfile = optarg; break;            // command file, supersedes -R -E
         case 'd':                                     // decompilation all-in-one
             noequs = true;
             nooctal = true;
             litconst = true;
             basereg = 8;
             break;
+        case 'h':
+            print_help(argv[0]);
+            exit(EXIT_SUCCESS);
         default:
-            fprintf(stderr, usage, argv[0]);
+            fprintf(stderr, usage, argv[0], argv[0]);
             exit(EXIT_FAILURE);
         }
     }
 
     if (optind >= argc) {
-        fprintf (stderr, usage, argv[0]);
+        fprintf (stderr, usage, argv[0], argv[0]);
         exit (EXIT_FAILURE);
     }
 
-    if (ascii) load_offsets(ascii, isooff, "ASCII/ISO");
-    if (text)  load_offsets(text, textoff, "TEXT");
-    if (gost)  load_offsets(gost, gostoff, "GOST");
-    if (itm)   load_offsets(itm, itmoff, "ITM");
+    if (cmdfile) {
+        // -D supersedes the capital-letter offset/entry/base options.
+        basereg = 0;
+        load_command_file(cmdfile, basereg);
+    } else {
+        if (entries) load_offsets(entries, codeoff, "entry point");
+    }
     populate_itm();
 
     fprintf(stderr, "Decompiling file %s\n", argv[optind]);
