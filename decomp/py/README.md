@@ -44,7 +44,7 @@ print(render_out(nodes))          # ;-terminated surface form
   `decompG` (Pascal-Autocode) supersedes `decomp2/3`, `decompA` (Pascal-Monitor)
   supersedes `decomp4`.  (decomp2 was already subsumed by decomp3, which decompG
   in turn supersedes.)
-* **`PIPELINE`** — 41 ordered passes in five slices: front-end normalization →
+* **`PIPELINE`** — 42 ordered passes in five slices: front-end normalization →
   prologue recognition + `processprocs` → pre-stack recognizers (constants,
   indirect addressing, calls, casts, branch folding) → the **stack machine** →
   back-end substitution (sets, relops, struct fields, FUNCRET, loop/`if`
@@ -80,18 +80,19 @@ Current closeness, each profile against its own intended target sample:
 |---------|--------|-----------|--------|-----------|
 | profile 4 | Pascal-Monitor  | `decompA` | `pb` | ~95% |
 | profile 1 | DMS             | `decompF` | `dms`| ~95% |
-| profile 3 | Pascal-Autocode | `decompG` | `pa` | ~92% |
+| profile 3 | Pascal-Autocode | `decompG` | `pa` | ~99% |
 
 Profile 3 dropped from ~95% (vs the older decomp3) to ~78% when re-based onto the
-much richer `decompG`, then climbed back to ~92% as decompG features were ported:
+much richer `decompG`, then climbed to ~99% as decompG features were ported:
 `_while`, real `_proced`/`_function`/`_var` declarations, the `g` global prefix,
 structured-`if` recognition (`_or` merge + single/block folds), `_for` close
 comments, `R13` data/code section labels, the `&*(&X+0)`/`@.f[0]` pointer strips,
-the `output@`/`writeAlfa` → `write` folds, and the `_IN`/`_MOD`/`EXIT`
-underscore-keyword renames.  The bulk of the remaining gap is now a single
-stack-machine feature -- the fixed-point `X - (Y * Z)` multiply-subtract idiom
-(`,YTA,64-40`/`15,A-X,0`) that decompG lifts but the Python interpreter still
-dumps as `#…` -- plus the `R4->5` register-field lift (see Known gaps).
+the `output@`/`writeAlfa` → `write` and `pck`/`unpck` argument folds, the
+`_IN`/`_MOD`/`EXIT` underscore-keyword renames, the fixed-point `X - (Y * Z)`
+multiply-subtract lift (stripping the `,AOX,C/0022 … ,YTA,64-40` wrappers), the
+`RN->M` record/base-register field lift, the `15,WTC,0` indexed-store fix (it must
+consume the instruction), and the reg-13 `put`/`get`/`eof`/`eoln` runtime pairs.
+The remaining ~1% is a long tail of small idioms (see Known gaps).
 
 ### End-to-end DMS coverage tests
 
@@ -119,26 +120,18 @@ is expected to diverge.)
 * **Not replicated (Perl bugs):** the `1RETURN` artifact from a substring-match
   on `13,UJ,0`; the trailing `;` glued onto the last `C ----` comment before
   indented code. The rewrite emits the cleaner form.
-* **The fixed-point multiply-subtract idiom (profile 3's biggest remaining
-  gap, ~320 lines):** decompG's stack machine lifts the BESM-6 `X - (Y * Z)`
-  sequence (`… * (NC) ; ,YTA,64-40 ; ,XTS,X ; 15,A-X,0`, sometimes through
-  `P/MD`) into a single `X := (X - (Y * Z))`; the Python interpreter does not
-  yet recognize it, so it emits a premature `#…` dump and an empty-RHS
-  `X := ;` followed by the raw `,YTA,`/`,A-X,`/`,A*X,` instructions.  This one
-  idiom accounts for the large `W := ;` / `,W,W;` / `#(…)` diff clusters.
-* **`R4->5` register-field lift (~40 lines):** `4,XTA,5` (a field load through a
-  base register) is not lifted to `R4->5`, so `R4->5 := …` / `#R4->5` and a few
-  loops that index through it still diverge.
-* **The `R13 := &X; … := pck/unpck/get/put` argument folds (~30 lines)** depend
-  on the multiply-subtract lift above (they consume its `R13 := &arg` setup), so
-  they unblock once it lands.  Also pending: the P/A7 two-width centering form
-  `write('…':( (wC), (wC) ))` (decompG keeps both args when the second is not the
-  string descriptor; the Python `convert_write_strings` always collapses to a
-  single width, ~13 lines); the `symbol/operator/options/form` enum-file
-  substitution; and decompF's DMS `getString` write-literal extraction.
-* The Pascal-Autocode stack machine resets `stack`/`regs` at every label
-  (decompG's `@stack = () if /:,/`), discarding a basic block's leftover stack
-  as dead rather than dumping a premature `#…`.
+* **Profile 3's remaining ~1% is a long tail of small idioms:** real-arithmetic
+  lifting (`,*50,5` real-multiply, `intToReal(x) * LN(intToReal(x))` still dumps
+  `#…`); `round`/other named runtimes that need the `routines.txt` table (the
+  rewrite calls `L12674(…)` where decompG resolves `round(…)`); the `toSet(X)`
+  set-cast losing its operand to `0` in a complement idiom; the `R13 := &g134z`
+  vs `R13 := g134z` global `&`-strip; and decompG's own `_while` inconsistency
+  (loops it recovers via its block-if path (l.940) get a double-space `_while
+  _not` and a plain `_)` close, vs the single-space, `(* while L *) _)` form of
+  its top-tested path (l.938); the Python recognizer always emits the latter).
+* **Per-target tables** are still not loaded: `routines`/`globals`/`symbol`
+  (`Dialect.const_map` is the hook), the `symbol/operator/options/form` enum-file
+  substitution, and decompF's DMS `getString` write-literal extraction.
 
 Ported so far: the for-loop stack-transform, register faking, the pre-seeded
 constant tables, `setup`/`rollup`, the DMS `P/1D` static-init mapping, the DMS
@@ -165,7 +158,16 @@ pairwise merge of same-target guards, the single-statement
 to decompG's `[^J;]`/`[^BS]` body screens), the `_for` close comments
 `(* for N *) _)`, the `R13 := &N` → `/N`|`LN` data/code section labels, the
 `R13 := &6; writeAlfa(&6, X)` → `write(X)` and `output@ := X; put(output)` →
-`write(X)` folds, the `&*(&X+0)` → `X` and `@.f[0]` → `@` pointer strips, and
-the `_IN`/`_MOD` set/modulo keywords.
+`write(X)` folds, the `&*(&X+0)` → `X` and `@.f[0]` → `@` pointer strips, the
+`_IN`/`_MOD` set/modulo keywords, the fixed-point multiply-subtract lift (strip
+the `,AOX,C/0022 … ,YTA,64-40`/`P/0060` wrappers so `,A*X,` is a plain multiply,
+decompG ll.270-279), the `RN->M` record/base-register field lift (a data op
+through a register above the display level, decompG l.188), the `15,WTC,0`
+indexed-store fix (consume the instruction so the store keeps its value;
+single-element subscripts empty the stack like decompG's negative-index wrap),
+the `pck`/`unpck` argument folds (`R13 := X ; Y := pck` → `pck(X, Y)`), the P/A7
+two-width centering form (`write('…':( (wC), (wC) ))`, single width only when the
+2nd arg is the string descriptor), and the reg-13 file-op pairs (`13,VTM,X ;
+14,VJM,P/0040` → `put(X)`, `/GF` → `get`, `/EO` → `eof`, `/EL` → `eoln`).
 * **Per-target tables** (`routines`/`globals`/`locals`/`symbol`/…) are not yet
   loaded; `Dialect.const_map` is the hook for them.

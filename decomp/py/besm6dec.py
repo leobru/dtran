@@ -594,6 +594,16 @@ def processprocs(d: Dialect, nodes: list[Node]) -> list[Node]:
                 n.reg, n.arg = "", name
                 i += 1
                 continue
+            # Pascal-Autocode (decompG l.188): a data op through a base register
+            # *above* the display level (`curlev < N <= 6`, or R9/R13) is record/
+            # `with` field access -> `RN->M`.  decomp2/3 don't VTM-fake -- the base
+            # itself is set in the stack machine (`R13 := &x`) -- so this is the
+            # only register lift on the track_regs path.  Runs after the display-
+            # locals block above, which already claimed registers 2..curlev.
+            if (d.track_regs and curlev != -1 and r.isdigit() and n.arg.isdigit()
+                    and _is_dataop(n.op)
+                    and (r in ("9", "13") or curlev < int(r) <= 6)):
+                n.reg, n.arg = "", f"R{r}->{n.arg}"; i += 1; continue
             # DMS/Pascal-Monitor register faking (runs regardless of curlev, as
             # in the Perl `[$curlev-69]` class): r,VTM,x -> XTA &x / ATX Rr, then
             # later reads of Rr resolve.  decomp2/3 track registers in the stack
@@ -889,12 +899,15 @@ _PA_WRITE = {
     ("14", "CW"): "writeChar", ("14", "6A"): "CALL writeAlfa",
     ("14", "WI"): "CALL writeInt", ("14", "WC"): "CALL writeCharWide",
     ("14", "0026"): "get(input)", ("14", "0030"): "put(output)",
+    ("14", "0032"): "rewrite(output)",
     ("14", "0033"): "CALL unpck", ("14", "0040"): "CALL put",
     ("14", "0041"): "CALL get", ("14", "0042"): "CALL reset",
     ("14", "0064"): "CALL rewrite",
 }
 _PA_IO = {"EO": "eof", "EL": "eoln", "GF": "get", "PF": "put",
           "RF": "reset", "TF": "rewrite"}
+# decompG ll.363-366: the same file predicates taken through R13 (P/0040 = put).
+_PA_IO13 = {"EO": "eof", "EL": "eoln", "GF": "get", "0040": "put"}
 
 
 def recognize_writes_pa(d: Dialect, nodes: list[Node]) -> list[Node]:
@@ -907,6 +920,12 @@ def recognize_writes_pa(d: Dialect, nodes: list[Node]) -> list[Node]:
     for n in nodes:
         if is_insn(n, "VJM") and n.arg.startswith("P/"):
             code = n.arg[2:].strip()
+            # `13,VTM,X ; 14,VJM,P/<EO|EL|GF|0040>` -> eof/eoln/get/put(X), folded
+            # before the VTM becomes `R13 := &X` (checked before the generic map,
+            # which would otherwise claim P/0040 as `CALL put`).
+            if (n.reg == "14" and code in _PA_IO13
+                    and out and is_insn(out[-1], "VTM", "13")):
+                out.append(Text(f"{_PA_IO13[code]}({out.pop().arg})")); continue
             name = _PA_WRITE.get((n.reg, code))
             if name is not None:
                 out.append(Text(name)); continue
@@ -1035,6 +1054,66 @@ _RE_15C = re.compile(r"^15,C(..),0?$")
 _RE_C = re.compile(r"^,C(..),(.*)$")
 
 
+def _insn(n: Node, op: str, arg: Optional[str] = None, reg: str = "") -> bool:
+    return (isinstance(n, Insn) and n.op == op and n.reg == reg
+            and (arg is None or n.arg == arg))
+
+
+def pa_fixmul_strip(d: Dialect, nodes: list[Node]) -> list[Node]:
+    """Strip the BESM-6 integer-multiply normalization wrappers so the stack
+    machine sees a plain `,A*X,(N)` (decompG ll.270-279).  An integer `Y * Z` is
+    evaluated in fixed point: `,AOX,C/0022` tags the operand, `,A*X,` forms the
+    product, and `,YTA,64-40` / `,YTA,(31C)` (or a `14,VJM,P/0060` runtime call in
+    `(*=M+*)` mode) re-normalizes it.  Left in place, `,YTA,...` is an unknown
+    barrier that flushes the accumulator (dumping `#...` then an empty-RHS
+    `X := `), and `,AOX,C/0022` is misread as a bitwise `|`.
+
+    Only the *wrapped* form folds: a `,A*X,(6400000000NC);,YTA,(255)` index
+    multiply collapses to `,A*X,(NC)`, but a bare `,A*X,(6400000000NC);,YTA,64-40`
+    with no preceding `,AOX,` is left to dump -- exactly as decompG does (golden
+    `#(R4->3 * (6400000000000010C))`).  Gated on `track_regs` (Pascal-Autocode)."""
+    if not d.track_regs:
+        return nodes
+
+    def yta(n: Node) -> bool:   # the normalize closing an `,AOX,C/0022 ...` wrap
+        return _insn(n, "YTA", "(31C)") or _insn(n, "YTA", "64-40")
+
+    # 270/271: ,AOX,C/0022 ; X ; ,YTA,(31C)|64-40  ->  X
+    out: list[Node] = []
+    i = 0
+    while i < len(nodes):
+        if (_insn(nodes[i], "AOX", "C/0022") and i + 2 < len(nodes)
+                and isinstance(nodes[i + 1], Insn) and yta(nodes[i + 2])):
+            out.append(nodes[i + 1]); i += 3; continue
+        out.append(nodes[i]); i += 1
+    nodes = out
+
+    # 274: ,AOX,C/0022 ; [,NTR,3 ;] X ; 14,VJM,P/0060  ->  X   ((*=M+*) multiply)
+    out = []
+    i = 0
+    while i < len(nodes):
+        if _insn(nodes[i], "AOX", "C/0022"):
+            j = i + 1
+            if j < len(nodes) and _insn(nodes[j], "NTR", "3"):
+                j += 1
+            if (j + 1 < len(nodes) and isinstance(nodes[j], Insn)
+                    and _insn(nodes[j + 1], "VJM", "P/0060", reg="14")):
+                out.append(nodes[j]); i = j + 2; continue
+        out.append(nodes[i]); i += 1
+    nodes = out
+
+    # 279: ,A*X,(6400000000NC) ; ,YTA,(255)  ->  ,A*X,(NC)   (index multiply)
+    out = []
+    i = 0
+    while i < len(nodes):
+        mm = (isinstance(nodes[i], Insn) and nodes[i].op == "A*X"
+              and re.fullmatch(r"\(6400000000(\d+)C\)", nodes[i].arg))
+        if mm and i + 1 < len(nodes) and _insn(nodes[i + 1], "YTA", "(255)"):
+            out.append(Insn(op="A*X", arg=f"({mm.group(1)}C)")); i += 2; continue
+        out.append(nodes[i]); i += 1
+    return out
+
+
 def stack_machine(d: Dialect, nodes: list[Node]) -> list[Node]:
     """Emulate the accumulator/stack to rebuild expressions and statements.
 
@@ -1127,8 +1206,10 @@ def stack_machine(d: Dialect, nodes: list[Node]) -> list[Node]:
             stack[-1] = f"card({stack[-1]})"; i += 1; continue
         if stack and (",ANX,int(0)" in line or (d.track_regs and ",ANX,0" in line)):
             stack[-1] = f"ffs({stack[-1]})"; i += 1; continue
-        if d.track_regs and stack and ",AEX,(1C)" in line:
-            stack[-1] = f"_not ({stack[-1]})"; i += 1; continue
+        # NB: decompG's `,AEX,(1C)` -> `_not` (l.610) is dead code -- its Perl
+        # regex captures `(1C)` as a group, so it only matches an unparenthesized
+        # `,AEX,1C`, which never occurs; the real `,AEX,(1C)` falls through to the
+        # `^` operator (`(x ^ (1C))`), so it is not special-cased here.
         if d.track_regs and stack and "CALL P/0024" in line:
             stack[-1] = f"intToReal({stack[-1]})"; i += 1; continue
         if d.track_regs and "CALL P/0023" in line:
@@ -1156,9 +1237,17 @@ def stack_machine(d: Dialect, nodes: list[Node]) -> list[Node]:
                 stack[-1] = (f"({stack[-1]} << {m.group(2)})" if m.group(1) == "-"
                              else f"({stack[-1]} >> {m.group(2)})")
                 i += 1; continue
-            if len(stack) >= 2 and "15,WTC,0" in line and i + 1 < N and items[i + 1]:
-                items[i + 1] += f"[{stack[-2]}]"
-                stack[-2] = stack[-1]; stack.pop(); continue
+            if stack and "15,WTC,0" in line and i + 1 < N and items[i + 1]:
+                # subscript the next op with stack[-2]; collapse and advance past
+                # the WTC (decompG l.626 does `$ops[++$from]`, consuming it).  With
+                # a lone element, decompG's `$stack[$#stack-1]` wraps to `[-1]`, so
+                # the index is the only value and the stack empties.
+                if len(stack) >= 2:
+                    items[i + 1] += f"[{stack[-2]}]"
+                    stack[-2] = stack[-1]
+                else:
+                    items[i + 1] += f"[{stack[-1]}]"
+                stack.pop(); i += 1; continue
 
         # ---- ,ATI,r : register assignment / capture ----
         m = re.match(r",ATI,(\d+)", line)
@@ -1251,7 +1340,9 @@ def stack_machine(d: Dialect, nodes: list[Node]) -> list[Node]:
             stack[-1] = f"({stack[-1]} {_AOP[m.group(1)]} {m.group(2)})"; i += 1
         elif stack and (m := re.match(r"^,X-A,(.*)", line)):
             stack[-1] = f"({m.group(1)} - {stack[-1]})"; i += 1
-        elif stack and (m := re.match(r"^,XTS,(.*)", line)):
+        elif (d.track_regs or stack) and (m := re.match(r"^,XTS,(.*)", line)):
+            # Pascal-Autocode (decompG l.737) pushes even on an empty stack;
+            # DMS/Pascal-Monitor (decompF/A) require an accumulator to push.
             stack.append(m.group(1)); i += 1
         elif stack and line == "15,ATX,0":
             stack.append(stack[-1]); i += 1
@@ -1411,13 +1502,20 @@ def convert_write_strings(d: Dialect, nodes: list[Node]) -> list[Node]:
             out.append(Text(f"write({m3.group(1)},'{s}':{int(m4.group(1), 8)})"))
             i += 4
             continue
-        # write('string':width)  via P/A7
-        mw = re.fullmatch(r"P/A7\( \((\d+)C\), \(\d+C\) \)", tc) if tc else None
-        if m1 and m2 and mw:
-            s = _getstring(gmap, int(m2.group(1)), int(m1.group(1)))
-            out.append(Text(f"write('{s}':{int(mw.group(1), 8)})"))
-            i += 3
-            continue
+        # write('string':...) via P/A7 (decompG ll.904/905).  Single width only
+        # when the 2nd arg is literally the R9 address `(addr)`; otherwise both
+        # args are kept (the `15,ATX,` width-duplication = a centered field).
+        if m1 and m2 and tc:
+            m904 = re.fullmatch(rf"P/A7\( \((\d+)C\), \({m2.group(1)}\) \)", tc)
+            m905 = re.fullmatch(r"P/A7\((.*)\)", tc)
+            if m904 or m905:
+                s = _getstring(gmap, int(m2.group(1)), int(m1.group(1)))
+                if m904:
+                    out.append(Text(f"write('{s}':{int(m904.group(1), 8)})"))
+                else:
+                    out.append(Text(f"write('{s}':({m905.group(1)}))"))
+                i += 3
+                continue
         # write('string')  via writeString
         m1 = re.fullmatch(r"R10 := &-(\d+)", ta) if ta else None
         m2 = re.fullmatch(r"R13 := &(\d+)", tb) if tb else None
@@ -1431,12 +1529,10 @@ def convert_write_strings(d: Dialect, nodes: list[Node]) -> list[Node]:
             out.append(Text(f"BIND('{_getstring(gmap, int(m.group(1)), 6)}')"))
             i += 2
             continue
-        # output@ := (NC) ; put(output)  ->  write('<char>')
-        mo = re.fullmatch(r"output@ := \((\d+)C\)", ta) if ta else None
-        if mo and tb == "put(output)":
-            out.append(Text(f"write('{_gost_char(int(mo.group(1), 8))}')"))
-            i += 2
-            continue
+        # NB: decompG's `output@ := (NC); put(output)` -> char-write (l.919) is
+        # disabled; the generic `output@ := X; put(output)` -> write(X) fold in
+        # pa_ptr_folds keeps the operand verbatim (`write((NC))`), so nothing is
+        # special-cased here.
         # single-statement forms
         if ta is not None:
             new = _rewrite_write_stmt(ta)
@@ -1772,11 +1868,16 @@ def pa_addr_folds(d: Dialect, nodes: list[Node]) -> list[Node]:
 
 def pa_ptr_folds(d: Dialect, nodes: list[Node]) -> list[Node]:
     """Pascal-Autocode pointer / I/O folds that run *after* structured-if
-    recognition (decompG ll.936/948/951):
+    recognition (decompG ll.936/943/944/948/951):
 
       `&*(&X+0)`  -> `X`                 (trivial pass-by-reference)
       `@.f[0]`    -> `@`                 (drop the synthetic first-field index)
-      `output@ := X ; put(output)` -> `write(X)`   (adjacent nodes)
+      `output@ := X ; put(output)` -> `write(X)`           (adjacent nodes)
+      `R13 := X ; Y := pck`        -> `pck(X, Y)`           (adjacent nodes)
+      `R13 := X ; unpck( ARGS )`   -> `unpck(X,  ARGS )`    (adjacent nodes)
+
+    pck/unpck take their source pointer in R13; the load is folded back in as the
+    first argument.
     """
     if not d.underscore_kw:
         return nodes
@@ -1786,14 +1887,20 @@ def pa_ptr_folds(d: Dialect, nodes: list[Node]) -> list[Node]:
     out: list[Node] = []
     i = 0
     while i < len(nodes):
-        a, b = nodes[i], nodes[i + 1] if i + 1 < len(nodes) else None
-        if (isinstance(a, Text) and not a.raw and isinstance(b, Text)
-                and not b.raw and b.text == "put(output)"):
+        a = nodes[i]
+        b = nodes[i + 1] if i + 1 < len(nodes) else None
+        if isinstance(a, Text) and not a.raw and isinstance(b, Text) and not b.raw:
             ma = re.fullmatch(r"output@ := (.*)", a.text)
-            if ma:
-                out.append(Text(f"write({ma.group(1)})"))
-                i += 2
-                continue
+            if ma and b.text == "put(output)":
+                out.append(Text(f"write({ma.group(1)})")); i += 2; continue
+            mr = re.fullmatch(r"R13 := (.*)", a.text)
+            if mr:
+                mp = re.fullmatch(r"(.*) := pck", b.text)
+                if mp:
+                    out.append(Text(f"pck({mr.group(1)}, {mp.group(1)})")); i += 2; continue
+                if b.text.startswith("unpck("):
+                    out.append(Text(f"unpck({mr.group(1)}, {b.text[len('unpck('):]}"))
+                    i += 2; continue
         out.append(a)
         i += 1
     return out
@@ -1969,6 +2076,7 @@ PIPELINE: list[Pass] = [
     normalize_utc_vtm,
     processprocs,
     # --- slice 3: pre-stack-machine recognizers ---
+    pa_fixmul_strip,         # decompG fixed-point multiply-wrapper strip
     subst_constants,
     indirect_addressing,
     recognize_writes,
